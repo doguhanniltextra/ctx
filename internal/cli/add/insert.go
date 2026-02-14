@@ -46,19 +46,17 @@ func insertAfterHeader(content, entry, header string) []byte {
 			continue
 		}
 
-		// No context marker: we found the insertion point.
-		if !startsWithCtxMarker(content[insertPoint:]) {
-			break
-		}
-
-		// Skip past the closing marker
+		// Skip past any comment block (ctx marker or generic comment)
 		hasCommentEnd, endIdx := containsEndComment(content[insertPoint:])
-		if !hasCommentEnd {
-			break
+		if hasCommentEnd {
+			// It's a comment. Skip it.
+			insertPoint += endIdx + len(config.CommentClose)
+			insertPoint = skipWhitespace(content, insertPoint)
+			continue
 		}
 
-		insertPoint += endIdx + len(config.CommentClose)
-		insertPoint = skipWhitespace(content, insertPoint)
+		// Not a comment, and not whitespace. We found the insertion point.
+		break
 	}
 
 	return []byte(content[:insertPoint] + entry)
@@ -152,9 +150,9 @@ func insertTaskAfterSection(entry, content, section string) []byte {
 
 // insertDecision inserts a decision entry before existing entries.
 //
-// Finds the first "## [" marker and inserts before it, maintaining
-// reverse-chronological order. Falls back to insertAfterHeader if no entries
-// exist.
+// Finds the first "## [" marker and inserts before it, ensuring the marker
+// is not inside an HTML comment. Falls back to insertAfterHeader if no
+// entries exist.
 //
 // Parameters:
 //   - content: Existing file content
@@ -164,8 +162,51 @@ func insertTaskAfterSection(entry, content, section string) []byte {
 // Returns:
 //   - []byte: Modified content with entry inserted
 func insertDecision(content, entry, header string) []byte {
-	// Find the first entry marker "## [" (timestamp-prefixed sections)
-	entryIdx := strings.Index(content, "## [")
+	// Function to find "## [" outside of comments
+	findEntryStart := func(s string) int {
+		idx := 0
+		for idx < len(s) {
+			// Find next "## ["
+			nextEntry := strings.Index(s[idx:], "## [")
+			if nextEntry == -1 {
+				return -1
+			}
+			absoluteEntryIdx := idx + nextEntry
+
+			// Find next comment start "<!--"
+			nextCommentStart := strings.Index(s[idx:], "<!--")
+
+			// If no comment or entry is before comment, we found it!
+			if nextCommentStart == -1 || nextEntry < nextCommentStart {
+				return absoluteEntryIdx
+			}
+
+			// Entry is after comment start. Check if it's inside or after.
+			absoluteCommentStart := idx + nextCommentStart
+
+			// Find comment end "-->"
+			nextCommentEnd := strings.Index(s[absoluteCommentStart:], "-->")
+			if nextCommentEnd == -1 {
+				// Comment never ends? Weird, but let's assume entry is valid then
+				// or maybe invalid? Better to be safe and just return it.
+				// In a well-formed file, comments end.
+				return absoluteEntryIdx
+			}
+			absoluteCommentEnd := absoluteCommentStart + nextCommentEnd + 3 // +3 for len("-->")
+
+			// If entry is BEFORE comment end, it's inside. Skip past comment.
+			if absoluteEntryIdx < absoluteCommentEnd {
+				idx = absoluteCommentEnd
+				continue
+			}
+
+			// Entry is after comment end. Valid.
+			return absoluteEntryIdx
+		}
+		return -1
+	}
+
+	entryIdx := findEntryStart(content)
 	if entryIdx != -1 {
 		// Insert before the first entry, with a separator after
 		return []byte(
